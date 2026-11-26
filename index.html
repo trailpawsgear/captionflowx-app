@@ -70,6 +70,19 @@
   #results.show{display:block}
   .spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(242,243,245,.3);border-top-color:var(--text);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:8px}
   @keyframes spin{to{transform:rotate(360deg)}}
+
+  .price-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  @media(min-width:480px){.price-grid{grid-template-columns:repeat(4,1fr)}}
+  .price-card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center}
+  .price-card b{display:block;font-size:1.05rem;margin-bottom:4px}
+  .price-card span{font-size:.76rem;color:var(--muted)}
+  #priceNote{font-size:.85rem;color:var(--text);margin-top:14px;min-height:1.2em}
+
+  .modal-overlay{position:fixed;inset:0;background:rgba(5,6,10,.72);display:none;align-items:center;justify-content:center;padding:20px;z-index:100}
+  .modal-overlay.show{display:flex}
+  .modal-box{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:20px;max-width:480px;width:100%;max-height:88vh;overflow:auto}
+  .modal-box h3{margin:0 0 14px;font-size:1rem}
+  .modal-close{background:transparent;color:var(--muted);border:1px solid var(--border);width:auto;padding:8px 14px;font-size:.82rem;margin-top:14px}
 </style>
 </head>
 <body>
@@ -82,7 +95,7 @@
     <div class="arrow">→</div>
     <div class="card"><b>Translated</b>1<br>00:00:01,000 --&gt; 00:00:04,000<br>Ciao mondo, questo è un test.</div>
   </div>
-  <a href="#tool" class="hero-cta">Generate subtitles, free</a>
+  <a href="#tool" class="hero-cta">Generate subtitles</a>
 </section>
 <div class="wrap">
   <div id="tool">
@@ -91,11 +104,22 @@
     <p>This isn't the auto-captions TikTok and Instagram already give you for free. Pick a video or audio file, choose your target languages, and get back SRT subtitle files, original transcript plus every translation, ready to drop into your editor or reuse on another platform.</p>
   </header>
 
+  <div class="panel">
+    <h2>Pricing</h2>
+    <div class="price-grid">
+      <div class="price-card"><b>Free</b><span>Up to 2 minutes</span></div>
+      <div class="price-card"><b>€2.99</b><span>Up to 10 minutes</span></div>
+      <div class="price-card"><b>€5.99</b><span>Up to 30 minutes</span></div>
+      <div class="price-card"><b>€9.99</b><span>Up to 60 minutes</span></div>
+    </div>
+  </div>
+
   <form id="form">
     <div class="panel">
       <h2>Your file</h2>
       <label for="fileInput">Video or audio file</label>
       <input type="file" id="fileInput" accept="video/*,audio/*" required>
+      <p class="note" id="priceNote"></p>
       <label for="sourceLang">Spoken language (optional hint)</label>
       <select id="sourceLang">
         <option value="">Auto-detect</option>
@@ -134,7 +158,7 @@
   </div>
 
   <p class="note">
-    Files are sent securely to generate the transcript and are not stored afterward. Processing time depends on the length of your file — a few seconds for a short clip, longer for anything several minutes long. Max file size is 25MB.
+    Files are sent securely to generate the transcript and are not stored afterward. Processing time depends on the length of your file — a few seconds for a short clip, longer for anything several minutes long. Max file size is 25MB, max length is 60 minutes.
   </p>
   </div>
 
@@ -144,9 +168,20 @@
   </footer>
 </div>
 
+<div class="modal-overlay" id="checkoutModal">
+  <div class="modal-box">
+    <h3>Complete your payment</h3>
+    <div id="checkoutMount"></div>
+    <button type="button" class="modal-close" id="checkoutCancel">Cancel</button>
+  </div>
+</div>
+
+<script src="https://js.stripe.com/v3/"></script>
 <script>
 (function(){
   const API_URL = "https://captionflowx-api.x8toolsteam.workers.dev/transcribe";
+  const CHECKOUT_URL = "https://captionflowx-api.x8toolsteam.workers.dev/create-checkout-session";
+  const STRIPE_PUBLISHABLE_KEY = "pk_live_51Ug67OPRG8QVS5cSAWC35tQDfVEsQCUrfWMAO7RrgfSGDiRMLjT5Bjp2PfM8agYVYnNxN6hSltteQuprP5d0v2tM00vA70JG4P";
   const MAX_BYTES = 25 * 1024 * 1024;
 
   const form = document.getElementById('form');
@@ -157,6 +192,44 @@
   const statusEl = document.getElementById('status');
   const resultsEl = document.getElementById('results');
   const resultListEl = document.getElementById('resultList');
+  const priceNoteEl = document.getElementById('priceNote');
+  const modalEl = document.getElementById('checkoutModal');
+  const checkoutCancelBtn = document.getElementById('checkoutCancel');
+
+  let stripeInstance = null;
+  let embeddedCheckout = null;
+  let pendingSubmission = null;
+
+  function getStripe(){
+    if (!stripeInstance) stripeInstance = Stripe(STRIPE_PUBLISHABLE_KEY);
+    return stripeInstance;
+  }
+
+  function tierForDuration(seconds){
+    if (!isFinite(seconds) || seconds <= 0) return undefined;
+    if (seconds <= 120) return { name: 'free', label: 'Free — up to 2 minutes' };
+    if (seconds <= 600) return { name: 'starter', label: '€2.99 — up to 10 minutes' };
+    if (seconds <= 1800) return { name: 'growth', label: '€5.99 — up to 30 minutes' };
+    if (seconds <= 3600) return { name: 'pro', label: '€9.99 — up to 60 minutes' };
+    return null;
+  }
+
+  function getMediaDuration(file){
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const media = document.createElement('video');
+      media.preload = 'metadata';
+      media.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        resolve(media.duration);
+      };
+      media.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('Could not read this file\'s length.'));
+      };
+      media.src = url;
+    });
+  }
 
   function setStatus(msg, kind){
     statusEl.textContent = '';
@@ -203,26 +276,80 @@
     return row;
   }
 
-  form.addEventListener('submit', async function(e){
-    e.preventDefault();
-    const file = fileInput.files[0];
-    if (!file){
-      setStatus('Choose a video or audio file first.', 'error');
+  fileInput.addEventListener('change', async function(){
+    if (!fileInput.files[0]){
+      priceNoteEl.textContent = '';
       return;
     }
-    if (file.size > MAX_BYTES){
-      setStatus('That file is ' + (file.size/1024/1024).toFixed(1) + 'MB — max is 25MB.', 'error');
-      return;
+    priceNoteEl.textContent = 'Checking file length…';
+    try {
+      const d = await getMediaDuration(fileInput.files[0]);
+      const tier = tierForDuration(d);
+      if (tier === null) {
+        priceNoteEl.textContent = 'This file is longer than 60 minutes, which isn\'t supported yet.';
+      } else if (tier) {
+        priceNoteEl.textContent = 'Price: ' + tier.label;
+      } else {
+        priceNoteEl.textContent = '';
+      }
+    } catch (e) {
+      priceNoteEl.textContent = '';
     }
+  });
 
-    const targetLangs = Array.from(document.querySelectorAll('.lang-check input:checked')).map(cb => cb.value);
-    const custom = customLang.value.trim();
-    if (custom) targetLangs.push(custom);
+  async function openCheckout(durationSeconds){
+    const resp = await fetch(CHECKOUT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ durationSeconds }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || data.error) {
+      throw new Error((data && data.error) || 'Could not start checkout.');
+    }
+    return data;
+  }
 
+  async function showCheckoutModal(clientSecret){
+    modalEl.classList.add('show');
+    const stripe = getStripe();
+    embeddedCheckout = await stripe.initEmbeddedCheckout({
+      clientSecret,
+      onComplete: onCheckoutComplete,
+    });
+    embeddedCheckout.mount('#checkoutMount');
+  }
+
+  function hideCheckoutModal(){
+    modalEl.classList.remove('show');
+    if (embeddedCheckout) {
+      embeddedCheckout.destroy();
+      embeddedCheckout = null;
+    }
+  }
+
+  checkoutCancelBtn.addEventListener('click', function(){
+    hideCheckoutModal();
+    pendingSubmission = null;
+    submitBtn.disabled = false;
+    setStatus('Payment canceled.', null);
+  });
+
+  async function onCheckoutComplete(){
+    hideCheckoutModal();
+    if (!pendingSubmission) return;
+    const submission = pendingSubmission;
+    pendingSubmission = null;
+    await runTranscription(submission);
+  }
+
+  async function runTranscription({ file, sourceLang: srcLang, targetLangs, durationSeconds, sessionId }){
     const formData = new FormData();
     formData.append('file', file, file.name);
-    if (sourceLang.value) formData.append('sourceLang', sourceLang.value);
+    if (srcLang) formData.append('sourceLang', srcLang);
     if (targetLangs.length) formData.append('targetLangs', targetLangs.join(','));
+    formData.append('durationSeconds', String(durationSeconds));
+    if (sessionId) formData.append('sessionId', sessionId);
 
     submitBtn.disabled = true;
     resultsEl.classList.remove('show');
@@ -255,6 +382,67 @@
     } catch (err) {
       setStatus('Could not reach the server: ' + (err && err.message ? err.message : err), 'error');
     } finally {
+      submitBtn.disabled = false;
+    }
+  }
+
+  form.addEventListener('submit', async function(e){
+    e.preventDefault();
+    const file = fileInput.files[0];
+    if (!file){
+      setStatus('Choose a video or audio file first.', 'error');
+      return;
+    }
+    if (file.size > MAX_BYTES){
+      setStatus('That file is ' + (file.size/1024/1024).toFixed(1) + 'MB — max is 25MB.', 'error');
+      return;
+    }
+
+    const targetLangs = Array.from(document.querySelectorAll('.lang-check input:checked')).map(cb => cb.value);
+    const custom = customLang.value.trim();
+    if (custom) targetLangs.push(custom);
+
+    submitBtn.disabled = true;
+    setStatus('Checking file length…', 'loading');
+
+    let durationSeconds;
+    try {
+      durationSeconds = await getMediaDuration(file);
+    } catch (err) {
+      setStatus('Could not read this file\'s length. Try a different file.', 'error');
+      submitBtn.disabled = false;
+      return;
+    }
+
+    const tier = tierForDuration(durationSeconds);
+    if (tier === undefined) {
+      setStatus('Could not read this file\'s length. Try a different file.', 'error');
+      submitBtn.disabled = false;
+      return;
+    }
+    if (tier === null) {
+      setStatus('This file is longer than 60 minutes, which isn\'t supported yet.', 'error');
+      submitBtn.disabled = false;
+      return;
+    }
+
+    if (tier.name === 'free') {
+      await runTranscription({ file, sourceLang: sourceLang.value, targetLangs, durationSeconds, sessionId: null });
+      return;
+    }
+
+    setStatus('Opening secure checkout…', 'loading');
+    try {
+      const result = await openCheckout(durationSeconds);
+      if (result.free) {
+        await runTranscription({ file, sourceLang: sourceLang.value, targetLangs, durationSeconds, sessionId: null });
+        return;
+      }
+      pendingSubmission = { file, sourceLang: sourceLang.value, targetLangs, durationSeconds, sessionId: result.sessionId };
+      setStatus('', null);
+      await showCheckoutModal(result.clientSecret);
+    } catch (err) {
+      setStatus('Could not start checkout: ' + (err && err.message ? err.message : err), 'error');
       submitBtn.disabled = false;
     }
   });
