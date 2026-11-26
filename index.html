@@ -313,7 +313,7 @@
   async function showCheckoutModal(clientSecret){
     modalEl.classList.add('show');
     const stripe = getStripe();
-    embeddedCheckout = await stripe.initEmbeddedCheckout({
+    embeddedCheckout = await stripe.createEmbeddedCheckoutPage({
       clientSecret,
       onComplete: onCheckoutComplete,
     });
